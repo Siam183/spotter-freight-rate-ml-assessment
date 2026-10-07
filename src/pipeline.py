@@ -1,217 +1,149 @@
+"""
+pipeline.py - Core data cleaning, missing value imputation, and feature engineering.
+"""
+
+from pathlib import Path
+import joblib
 import numpy as np
 import pandas as pd
-import joblib
-
 
 EARTH_RADIUS_MILES = 3958.761
 
 
-def fit_imputation_values(df):
-    """
-    Fit imputation statistics using the supplied training data only.
-    """
+def fit_imputation_values(df: pd.DataFrame) -> dict:
+    """Fit imputation statistics using the supplied training data only."""
+    df_temp = df.copy()
+    
+    # Standardize date format for mapping
+    if "date" in df_temp.columns:
+        df_temp["date_str"] = pd.to_datetime(df_temp["date"]).dt.strftime("%Y-%m-%d")
+    else:
+        df_temp["date_str"] = np.nan
 
     stats = {
-        "weight_overall": df["weight"].median(),
-        "market_overall": df["market_index"].median(),
-
+        "weight_overall": float(df_temp["weight"].median()) if "weight" in df_temp.columns else 0.0,
+        "market_overall": float(df_temp["market_index"].median()) if "market_index" in df_temp.columns else 1.0,
         "weight_by_equipment": (
-            df.groupby("equipment")["weight"]
-            .median()
-            .to_dict()
+            df_temp.groupby("equipment")["weight"].median().to_dict()
+            if "equipment" in df_temp.columns and "weight" in df_temp.columns
+            else {}
         ),
-
         "market_by_date": (
-            df.groupby("date")["market_index"]
-            .median()
-            .to_dict()
+            df_temp.groupby("date_str")["market_index"].median().to_dict()
+            if "market_index" in df_temp.columns
+            else {}
         ),
-
         "market_by_equipment": (
-            df.groupby("equipment")["market_index"]
-            .median()
-            .to_dict()
+            df_temp.groupby("equipment")["market_index"].median().to_dict()
+            if "equipment" in df_temp.columns and "market_index" in df_temp.columns
+            else {}
         ),
     }
 
     return stats
 
 
-def apply_imputation(df, stats):
-    """
-    Apply previously fitted preprocessing statistics.
-
-    The statistics must be fitted on the training data and then
-    reused for validation/test data.
-    """
-
+def apply_imputation(df: pd.DataFrame, stats: dict) -> pd.DataFrame:
+    """Apply previously fitted preprocessing statistics to new datasets."""
     out = df.copy()
 
-    # Negative weights are treated as invalid physical measurements.
-    out["weight"] = out["weight"].abs()
+    # Abs weight to handle invalid negative values
+    if "weight" in out.columns:
+        out["weight"] = out["weight"].abs()
+        out["weight"] = out["weight"].fillna(out["equipment"].map(stats.get("weight_by_equipment", {})))
+        out["weight"] = out["weight"].fillna(stats.get("weight_overall", 0.0))
 
-    # Equipment-level weight median, then overall median.
-    out["weight"] = out["weight"].fillna(
-        out["equipment"].map(stats["weight_by_equipment"])
-    )
+    # Market index imputation chain: date -> equipment -> overall
+    if "market_index" in out.columns:
+        if "date" in out.columns:
+            date_str_series = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
+            out["market_index"] = out["market_index"].fillna(date_str_series.map(stats.get("market_by_date", {})))
 
-    out["weight"] = out["weight"].fillna(
-        stats["weight_overall"]
-    )
+        if "equipment" in out.columns:
+            out["market_index"] = out["market_index"].fillna(out["equipment"].map(stats.get("market_by_equipment", {})))
 
-    # Market index: date median -> equipment median -> overall median.
-    out["market_index"] = out["market_index"].fillna(
-        out["date"].map(stats["market_by_date"])
-    )
-
-    out["market_index"] = out["market_index"].fillna(
-        out["equipment"].map(stats["market_by_equipment"])
-    )
-
-    out["market_index"] = out["market_index"].fillna(
-        stats["market_overall"]
-    )
+        out["market_index"] = out["market_index"].fillna(stats.get("market_overall", 1.0))
 
     return out
 
 
 def haversine_miles(lat1, lon1, lat2, lon2):
-    """
-    Calculate straight-line geographic distance between
-    two latitude/longitude points in miles.
-    """
-
-    lat1, lon1, lat2, lon2 = map(
-        np.radians,
-        [lat1, lon1, lat2, lon2]
-    )
-
+    """Calculate straight-line geographic distance between two points in miles."""
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
     dlat = lat2 - lat1
     dlon = lon2 - lon1
 
-    a = (
-        np.sin(dlat / 2.0) ** 2
-        + np.cos(lat1)
-        * np.cos(lat2)
-        * np.sin(dlon / 2.0) ** 2
-    )
-
-    return (
-        2
-        * EARTH_RADIUS_MILES
-        * np.arcsin(np.sqrt(a))
-    )
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
+    return 2 * EARTH_RADIUS_MILES * np.arcsin(np.sqrt(a))
 
 
-def add_features(df):
-    """
-    Add engineered features used by the final CatBoost model.
-    """
-
+def add_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add engineered domain and calendar features."""
     out = df.copy()
 
-    out["date"] = pd.to_datetime(out["date"])
+    # Standardize string representations for CatBoost categorical features
+    for cat_col in ["pickup", "delivery", "equipment"]:
+        if cat_col in out.columns:
+            out[cat_col] = out[cat_col].fillna("UNKNOWN").astype(str)
 
     # Calendar features
+    out["date"] = pd.to_datetime(out["date"])
     out["year"] = out["date"].dt.year
     out["month"] = out["date"].dt.month
     out["day_of_month"] = out["date"].dt.day
     out["day_of_week"] = out["date"].dt.dayofweek
     out["day_of_year"] = out["date"].dt.dayofyear
-    out["week_of_year"] = (
-        out["date"]
-        .dt.isocalendar()
-        .week
-        .astype(int)
-    )
+    out["week_of_year"] = out["date"].dt.isocalendar().week.astype(int)
 
-    # Coordinate differences
-    out["lat_diff"] = (
-        out["delivery_lat"] - out["pickup_lat"]
-    )
+    # Geographic features
+    if {"delivery_lat", "pickup_lat", "delivery_lon", "pickup_lon"}.issubset(out.columns):
+        out["lat_diff"] = out["delivery_lat"] - out["pickup_lat"]
+        out["lon_diff"] = out["delivery_lon"] - out["pickup_lon"]
+        out["abs_lat_diff"] = out["lat_diff"].abs()
+        out["abs_lon_diff"] = out["lon_diff"].abs()
 
-    out["lon_diff"] = (
-        out["delivery_lon"] - out["pickup_lon"]
-    )
+        out["geo_distance"] = haversine_miles(
+            out["pickup_lat"], out["pickup_lon"], out["delivery_lat"], out["delivery_lon"]
+        )
 
-    out["abs_lat_diff"] = out["lat_diff"].abs()
-    out["abs_lon_diff"] = out["lon_diff"].abs()
+        out["mid_lat"] = (out["pickup_lat"] + out["delivery_lat"]) / 2
+        out["mid_lon"] = (out["pickup_lon"] + out["delivery_lon"]) / 2
 
-    # Straight-line geographic distance
-    out["geo_distance"] = haversine_miles(
-        out["pickup_lat"],
-        out["pickup_lon"],
-        out["delivery_lat"],
-        out["delivery_lon"],
-    )
+    # Interaction & derived features
+    if "distance" in out.columns:
+        safe_distance = out["distance"].replace(0, np.nan)
 
-    # Route midpoint
-    out["mid_lat"] = (
-        out["pickup_lat"] + out["delivery_lat"]
-    ) / 2
+        if "weight" in out.columns:
+            out["weight_per_mile"] = (out["weight"] / safe_distance).fillna(0.0)
 
-    out["mid_lon"] = (
-        out["pickup_lon"] + out["delivery_lon"]
-    ) / 2
+        if "market_index" in out.columns:
+            out["distance_market"] = out["distance"] * out["market_index"]
 
-    # Derived rate-related features
-    safe_distance = out["distance"].replace(
-        0,
-        np.nan
-    )
+        if "quote_signal" in out.columns:
+            out["distance_quote"] = out["distance"] * out["quote_signal"]
 
-    out["weight_per_mile"] = (
-        out["weight"] / safe_distance
-    )
+    if {"market_index", "quote_signal"}.issubset(out.columns):
+        out["market_quote"] = out["market_index"] * out["quote_signal"]
 
-    out["distance_market"] = (
-        out["distance"] * out["market_index"]
-    )
-
-    out["distance_quote"] = (
-        out["distance"] * out["quote_signal"]
-    )
-
-    out["market_quote"] = (
-        out["market_index"] * out["quote_signal"]
-    )
+    # Drop non-predictive date object
+    out = out.drop(columns=["date"], errors="ignore")
 
     return out
 
 
-def prepare(df, stats):
-    """
-    Apply the complete preprocessing and feature-engineering pipeline.
-    """
-
-    cleaned = apply_imputation(
-        df,
-        stats
-    )
-
-    features = add_features(
-        cleaned
-    )
-
+def prepare(df: pd.DataFrame, stats: dict) -> pd.DataFrame:
+    """Full preprocessing and feature engineering execution pipeline."""
+    cleaned = apply_imputation(df, stats)
+    features = add_features(cleaned)
     return features
 
 
-def save_preprocessing(path, stats):
-    """
-    Save preprocessing statistics for reuse during prediction.
-    """
-
-    joblib.dump(
-        stats,
-        path
-    )
+def save_preprocessing(path: Path, stats: dict):
+    """Save preprocessing statistics object to disk."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(stats, path)
 
 
-def load_preprocessing(path):
-    """
-    Load previously saved preprocessing statistics.
-    """
-
-    return joblib.load(
-        path
-    )
+def load_preprocessing(path: Path) -> dict:
+    """Load precomputed preprocessing statistics from disk."""
+    return joblib.load(path)
