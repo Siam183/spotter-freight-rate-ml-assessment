@@ -1,1 +1,26 @@
+# Byte-compiled / Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
 
+# Environment folder
+.venv/
+venv/
+env/
+ENV/
+
+# IDE / Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary data, logs, and cache
+*.log
+.DS_Store
+.ipynb_checkpoints
+
+# Large model artifacts (optional: uncomment if file size exceeds GitHub 100MB limit)
+# models/*.cbm
+# models/*.pkl
