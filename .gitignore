@@ -24,3 +24,6 @@ ENV/
 # Large model artifacts (optional: uncomment if file size exceeds GitHub 100MB limit)
 # models/*.cbm
 # models/*.pkl
+
+# Generated scorer output
+scorer_results/
