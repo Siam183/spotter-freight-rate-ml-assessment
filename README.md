@@ -112,6 +112,6 @@ Author: Siam Al Qureshi[cite: 6]
 
 Role Target: Machine Learning Engineer Assessment[cite: 6]
 
-Report Document: reports/Siam_Al_Qureshi_Spotter_ML_Assessment_Report.docx
+Report Document: reports/Siam_Al_Qureshi_Spotter_ML_Assessment_Report.pdf
 
 [cite: 6]
