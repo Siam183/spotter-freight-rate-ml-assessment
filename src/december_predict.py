@@ -1,5 +1,5 @@
 """
-december_predict.py - Generate predictions for the December 2025 assessment evaluation dataset.
+src/december_predict.py - Generate predictions for data/december_chart_inputs.csv.
 """
 
 from pathlib import Path
@@ -14,15 +14,16 @@ from pipeline import (
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 MODEL_DIR = ROOT / "models"
-OUTPUT_DIR = ROOT / "outputs"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+PREDICTIONS_DIR = ROOT / "predictions"
+PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def find_december_file() -> Path:
-    """Locate December dataset."""
+    """Locate December chart input dataset."""
     candidates = [
-        DATA_DIR / "december.csv",
+        DATA_DIR / "december_chart_inputs.csv",
         DATA_DIR / "december-chart-inputs.csv",
+        DATA_DIR / "december.csv",
     ]
     for path in candidates:
         if path.exists():
@@ -39,7 +40,7 @@ def main():
     if not preprocess_path.exists():
         raise FileNotFoundError(f"Preprocessing file not found: {preprocess_path}")
 
-    print("Loading final CatBoost model...")
+    print("Loading CatBoost model...")
     model = CatBoostRegressor()
     model.load_model(model_path)
 
@@ -47,31 +48,31 @@ def main():
     preprocessing_stats = load_preprocessing(preprocess_path)
 
     december_file = find_december_file()
-    print(f"Loading December data: {december_file}")
+    print(f"Loading December input data: {december_file}")
     df = pd.read_csv(december_file)
-    print(f"December rows loaded: {len(df):,}")
 
     load_ids = df["load_id"].copy() if "load_id" in df.columns else df.index
     X_raw = df.drop(columns=["posted_rate", "load_id"], errors="ignore")
 
-    print("Transforming December features...")
+    print("Transforming features...")
     X = prepare(X_raw, preprocessing_stats)
 
-    print("Generating December predictions...")
+    print("Generating predictions...")
     predictions = model.predict(X)
 
-    output = pd.DataFrame({
-        "load_id": load_ids,
-        "predicted_rate": predictions
-    })
+    output = df.copy() if "predicted_rate" not in df.columns else df.drop(columns=["predicted_rate"])
+    output["predicted_rate"] = predictions
 
-    output_path = OUTPUT_DIR / "december_predictions.csv"
-    output.to_csv(output_path, index=False)
+    # Save outputs
+    output_path = PREDICTIONS_DIR / "december-chart-inputs-scored.csv"
+    output[["load_id", "predicted_rate"]].to_csv(output_path, index=False)
 
-    print(f"\nPredictions saved to: {output_path}")
-    print(f"Prediction rows: {len(output):,}")
-    print("\nFirst 10 predictions:")
-    print(output.head(10))
+    # In case data/december_chart_inputs.csv needs to be updated directly in place
+    direct_december_path = DATA_DIR / "december_chart_inputs.csv"
+    if direct_december_path.exists():
+        output.to_csv(direct_december_path, index=False)
+
+    print(f"Predictions successfully saved to: {output_path}")
 
 
 if __name__ == "__main__":
